@@ -191,6 +191,20 @@ def test_dotted_argument_key_marks_its_top_level_segment_known():
     assert evaluate_argument_policy(policy, {"options": {"mode": "safe"}}) is None
 
 
+def test_nested_unknown_field_is_a_documented_scope_limit_of_deny_unknown_arguments():
+    """`deny_unknown_arguments` only inspects top-level names (see
+    docs/policy-semantics.md): an extra field nested *inside* a known
+    top-level object is not, by itself, caught here. This is deliberate
+    scope, not a bypass - `validate_input_schema` (checked first, and
+    tested separately) is where a nested-structure attack is expected to be
+    caught when the upstream schema restricts it."""
+    policy = _policy(arguments={"options": {}})
+    result = evaluate_argument_policy(
+        policy, {"options": {"mode": "safe", "sneaky_extra_field": "attacker-controlled"}}
+    )
+    assert result is None
+
+
 # --- policy evaluation never mutates its input ------------------------------
 
 
@@ -256,3 +270,25 @@ def test_schema_validation_handles_malformed_schema_safely():
 
 def test_schema_validation_none_schema_is_permissive():
     assert validate_input_schema(None, {"anything": "goes"}) is None
+
+
+def test_schema_validation_catches_a_nested_unknown_field_the_policy_engine_does_not():
+    """Completes the "nested unknown arguments" adversarial category: an
+    extra field nested inside a known object argument isn't caught by
+    `evaluate_argument_policy`'s (top-level-only) unknown-field check, but
+    is caught here when the upstream schema restricts nested structure -
+    this is why schema validation runs before argument-policy evaluation."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "options": {
+                "type": "object",
+                "properties": {"mode": {"type": "string"}},
+                "additionalProperties": False,
+            }
+        },
+    }
+    result = validate_input_schema(
+        schema, {"options": {"mode": "safe", "sneaky_extra_field": "attacker-controlled"}}
+    )
+    assert result is not None

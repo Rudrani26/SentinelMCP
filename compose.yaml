@@ -1,0 +1,34 @@
+# One-command local demo: `docker compose up -d` starts the upstream
+# fixture server and the SentinelMCP gateway pointed at it, using the
+# bundled example policy (sentinelmcp/policy/policies/example.yaml).
+#
+# The API keys below are obviously-fake, local-demo-only values matching
+# that policy file's api_key_env references - never production credentials.
+# After `docker compose up -d`, see examples/demo.py (run on the host, not
+# in a container) or the README's Demo section for how to talk to the
+# running gateway.
+
+services:
+  upstream:
+    build: .
+    command: ["python", "-m", "examples.upstream_server", "--host", "0.0.0.0", "--port", "8765"]
+    ports:
+      - "8765:8765"
+
+  gateway:
+    build: .
+    depends_on:
+      - upstream
+    command:
+      [
+        "python", "-m", "sentinelmcp.gateway.server",
+        "--upstream-url", "http://upstream:8765/mcp",
+        "--policy", "sentinelmcp/policy/policies/example.yaml",
+        "--host", "0.0.0.0",
+        "--port", "8080",
+      ]
+    environment:
+      SENTINELMCP_DIAGNOSTICS_AGENT_API_KEY: "demo-only-not-a-real-secret-1"
+      SENTINELMCP_READONLY_AGENT_API_KEY: "demo-only-not-a-real-secret-2"
+    ports:
+      - "8080:8080"

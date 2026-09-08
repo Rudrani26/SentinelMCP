@@ -107,9 +107,12 @@ def _shared_api_key_env() -> AsyncIterator[None]:
 
 
 @pytest_asyncio.fixture(loop_scope="session", scope="session")
-async def gateway_url(_shared_api_key_env: None) -> AsyncIterator[str]:
+async def gateway_url(
+    _shared_api_key_env: None, tmp_path_factory: pytest.TempPathFactory
+) -> AsyncIterator[str]:
+    audit_log_path = tmp_path_factory.mktemp("sentinelmcp-audit") / "audit.jsonl"
     upstream = build_server().streamable_http_app(host="127.0.0.1")
     async with running_asgi_app(upstream) as upstream_url:
-        gateway = build_gateway_app(upstream_url, SHARED_POLICY)
+        gateway = build_gateway_app(upstream_url, SHARED_POLICY, audit_log_path=str(audit_log_path))
         async with running_asgi_app(gateway) as url:
             yield url

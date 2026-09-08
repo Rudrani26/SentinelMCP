@@ -99,3 +99,36 @@ async def test_unexpected_nested_structure_does_not_crash_the_gateway(gateway_ur
     )
     assert response.status_code < 500
     await _assert_gateway_still_works(gateway_url)
+
+
+@pytest.mark.parametrize(
+    "malformed_id",
+    [
+        b'{"weird": "object"}',  # JSON-RPC ids must be string/number/null
+        b"[1, 2, 3]",
+    ],
+)
+async def test_malformed_request_id_type_does_not_crash_the_gateway(gateway_url: str, malformed_id: bytes):
+    response = await _post_raw(
+        gateway_url,
+        b'{"jsonrpc": "2.0", "id": ' + malformed_id + b', "method": "tools/call", '
+        b'"params": {"name": "benchmark.noop", "arguments": {}}}',
+    )
+    assert response.status_code < 500
+    await _assert_gateway_still_works(gateway_url)
+
+
+async def test_repeated_request_id_does_not_crash_the_gateway(gateway_url: str):
+    """Two distinct requests reusing the same client-chosen JSON-RPC id, back
+    to back - a client protocol violation, but the gateway must stay
+    responsive rather than getting confused about which response goes with
+    which request."""
+    body = (
+        b'{"jsonrpc": "2.0", "id": "repeated-id", "method": "tools/call", '
+        b'"params": {"name": "benchmark.noop", "arguments": {}}}'
+    )
+    first = await _post_raw(gateway_url, body)
+    second = await _post_raw(gateway_url, body)
+    assert first.status_code < 500
+    assert second.status_code < 500
+    await _assert_gateway_still_works(gateway_url)

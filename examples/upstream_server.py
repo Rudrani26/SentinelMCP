@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from mcp.server.mcpserver import MCPServer
 
@@ -34,7 +34,20 @@ class InvocationCounters:
     fixed_latency: int = 0
 
 
+@dataclass
+class ConcurrencyTracker:
+    """Tracks concurrently in-flight `fixed_latency` calls, for Phase 4's
+    "hostile concurrent test must record maximum observed upstream
+    concurrency" requirement - an independent measurement, from the
+    upstream's own perspective, of whatever the gateway's concurrency
+    ceiling actually let through."""
+
+    current: int = 0
+    peak: int = 0
+
+
 counters = InvocationCounters()
+concurrency_tracker = ConcurrencyTracker()
 
 
 def build_server() -> MCPServer:
@@ -68,7 +81,12 @@ def build_server() -> MCPServer:
     async def fixed_latency(duration_seconds: float) -> dict:
         """Wait for a known duration, then return."""
         counters.fixed_latency += 1
-        await asyncio.sleep(duration_seconds)
+        concurrency_tracker.current += 1
+        concurrency_tracker.peak = max(concurrency_tracker.peak, concurrency_tracker.current)
+        try:
+            await asyncio.sleep(duration_seconds)
+        finally:
+            concurrency_tracker.current -= 1
         return {"ok": True, "duration_seconds": duration_seconds}
 
     return server

@@ -15,8 +15,28 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "hypothesis>=6.100",
+    "ruff>=0.16",
 ]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+# Explicit, not auto-discovered: this repo root also holds tests/,
+# benchmarks/, and examples/, each with their own __init__.py files, and
+# they are not meant to be part of the installed distribution.
+include = ["sentinelmcp*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+# A small, high-signal set (pycodestyle errors/warnings, pyflakes) - not the
+# opinionated style/import-sorting rule sets, which would demand a large,
+# low-value reformatting pass with no correctness benefit.
+select = ["E", "F", "W"]
