@@ -1,0 +1,52 @@
+# Example SentinelMCP policy - local demo only.
+#
+# api_key_env names an environment variable holding the principal's real API
+# key. This file never contains plaintext key material; set the referenced
+# environment variables yourself before starting the gateway, e.g.:
+#
+#   export SENTINELMCP_DIAGNOSTICS_AGENT_API_KEY=demo-only-not-a-real-secret-1
+#   export SENTINELMCP_READONLY_AGENT_API_KEY=demo-only-not-a-real-secret-2
+#
+# See docs/policy-semantics.md for the full semantics this file exercises.
+
+principals:
+  diagnostics-agent:
+    api_key_env: SENTINELMCP_DIAGNOSTICS_AGENT_API_KEY
+    tools:
+      database.query_stats:
+        effect: allow
+        deny_unknown_arguments: true
+        required:
+          - database
+          - limit
+        arguments:
+          database:
+            in:
+              - staging
+              - production
+          limit:
+            min: 1
+            max: 100
+          include_query_text:
+            equals: false
+
+      benchmark.noop:
+        effect: allow
+
+      benchmark.fixed_latency:
+        effect: allow
+        arguments:
+          duration_seconds:
+            min: 0
+            max: 60
+
+      # Explicit deny for readability; behaviorally identical to omitting
+      # this tool entirely (both deny).
+      database.execute_write:
+        effect: deny
+
+  readonly-agent:
+    api_key_env: SENTINELMCP_READONLY_AGENT_API_KEY
+    tools:
+      benchmark.noop:
+        effect: allow
