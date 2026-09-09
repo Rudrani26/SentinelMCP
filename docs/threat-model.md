@@ -46,8 +46,7 @@ authenticated; the upstream server is trusted once a request reaches it (see
 ## Threats addressed
 
 Each of these has automated tests - see `docs/adversarial-tests.md` for the
-category-to-test mapping and the Phase 6 report for the full 18-invariant
-mapping.
+category-to-test mapping and the full 18-invariant mapping.
 
 - Missing or invalid caller authentication (`BearerAuthMiddleware`, fails
   closed on missing/malformed/unknown/ambiguous credentials).

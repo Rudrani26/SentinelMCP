@@ -166,9 +166,9 @@ pytest tests/integration   # real loopback Streamable HTTP servers
 (no argument-policy mutation across arbitrary type-confused inputs; no
 sensitive-value leak through redaction at any nesting depth or key-casing
 variant). Every one of the 18 numbered security invariants in this
-project's build instructions maps to at least one automated test - see the
-Phase 6 build log and [`docs/adversarial-tests.md`](docs/adversarial-tests.md)
-for the full mapping.
+project's build instructions maps to at least one automated test - see
+[`docs/adversarial-tests.md`](docs/adversarial-tests.md) for the full
+mapping.
 
 ## Benchmark results
 

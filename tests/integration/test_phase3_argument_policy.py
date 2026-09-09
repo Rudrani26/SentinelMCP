@@ -69,6 +69,26 @@ async def test_policy_invalid_call_is_rejected_and_never_reaches_upstream(gatewa
     assert counters.query_stats == initial
 
 
+async def test_numeric_out_of_range_call_is_rejected_and_never_reaches_upstream(gateway_url: str):
+    """`limit` is schema-valid (upstream only declares it as an integer, with
+    no schema-level range) but exceeds the policy's `max: 100` - isolates the
+    numeric min/max constraint end-to-end, distinct from the `in`-set case
+    covered by test_policy_invalid_call_is_rejected_and_never_reaches_upstream
+    above."""
+    initial = counters.query_stats
+
+    async with authed_client(gateway_url, CONSTRAINED_KEY) as client:
+        result = await client.call_tool(
+            "database.query_stats",
+            {"database": "staging", "limit": 101, "include_query_text": False},
+        )
+
+    assert result.is_error
+    assert "Argument policy violation" in result.content[0].text
+    assert "Schema-invalid" not in result.content[0].text
+    assert counters.query_stats == initial
+
+
 async def test_missing_required_field_is_rejected_and_never_reaches_upstream(gateway_url: str):
     """`include_query_text` is policy-required (not schema-required, since it
     has a Python default) - omitting it isolates the policy-level `required`

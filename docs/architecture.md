@@ -179,6 +179,6 @@ SentinelMCP acts as a client, forcing the classic handshake rather than
 risking the SDK's default auto-negotiation silently landing on the
 sessionless era. Whether the gateway's own downstream-facing side should
 also *reject* a client's attempt to negotiate into the sessionless era
-remains an open, unresolved question - flagged in the Phase 0 report and
-never revisited, since no test client in this project's own test suite
-triggers it.
+remains an open, unresolved question, identified during initial SDK
+research and never revisited, since no test client in this project's own
+test suite triggers it.
