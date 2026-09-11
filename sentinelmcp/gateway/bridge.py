@@ -44,6 +44,49 @@ ListToolsHandler = Callable[
 CallToolHandler = Callable[[ServerRequestContext[Client], types.CallToolRequestParams], Awaitable[types.CallToolResult]]
 
 
+class UpstreamToolCache:
+    """Caches the upstream's `tools/list` result for the lifetime of one
+    upstream connection.
+
+    This gateway holds exactly one upstream `Client` connection for the
+    whole process (see `build_gateway_server`'s `lifespan`), shared across
+    every downstream session - so "cached for this connection's lifetime"
+    and "cached gateway-wide" are the same scope here, not two different
+    designs to choose between.
+
+    Race-safe under concurrent first callers: `get()` holds the lock across
+    the fetch itself, so a cold cache never issues more than one real
+    `tools/list` round trip even if many calls arrive at once - later
+    callers simply wait for the lock and then see the now-populated cache,
+    rather than each starting their own redundant fetch.
+
+    There is currently no code path in this gateway that reconnects a
+    dropped upstream connection - `lifespan` opens the `Client` once and
+    the gateway process does not attempt to re-establish it. So there is no
+    "stale after reconnect" scenario to handle automatically today.
+    `invalidate()` exists as an explicit, testable seam for an operator or a
+    future reconnect implementation to force a re-fetch; nothing currently
+    calls it on its own. See docs/architecture.md for the full reasoning,
+    including why a TTL or a `tools/list_changed` notification subscriber
+    was deliberately not added.
+    """
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._tools: list[types.Tool] | None = None
+
+    async def get(self, upstream: Client) -> list[types.Tool]:
+        async with self._lock:
+            if self._tools is None:
+                result = await upstream.list_tools()
+                self._tools = result.tools
+            return self._tools
+
+    async def invalidate(self) -> None:
+        async with self._lock:
+            self._tools = None
+
+
 def _denied_result(tool_name: str) -> types.CallToolResult:
     # Deliberately worded and shaped exactly like the upstream SDK's own
     # "unknown tool" tool-level error (see mcp.server.mcpserver.tools.tool_manager),
@@ -97,16 +140,39 @@ def _upstream_timeout_result(tool_name: str) -> types.CallToolResult:
     )
 
 
-def make_list_tools_handler(policy: PolicyConfig) -> ListToolsHandler:
-    """Build an on_list_tools handler that filters to the caller's allowed tools."""
+def _upstream_error_result(tool_name: str, reason: str) -> types.CallToolResult:
+    # Mirrors _upstream_timeout_result: an upstream failure (connection
+    # dropped, upstream crashed mid-call, etc.) is still surfaced to the
+    # downstream caller as a well-formed, protocol-correct CallToolResult -
+    # not as a raised exception that would tear down the caller's own
+    # transport-level stream with a raw, undistinguishable error (verified
+    # empirically: before this, a real killed-upstream test showed the
+    # downstream client receiving `MCPError("SSE stream ended without a
+    # response")` instead of a clean tool-level error).
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=f"Upstream error for {tool_name}: {reason}")],
+        is_error=True,
+    )
+
+
+def make_list_tools_handler(policy: PolicyConfig, tool_cache: UpstreamToolCache | None = None) -> ListToolsHandler:
+    """Build an on_list_tools handler that filters to the caller's allowed tools.
+
+    `tool_cache` defaults to a private cache scoped to this one handler
+    closure if not given; pass the same `UpstreamToolCache` instance used by
+    `make_call_tool_handler` (as `build_gateway_server` does) so `tools/list`
+    and `tools/call` share one cached fetch rather than each maintaining
+    their own.
+    """
+    cache = tool_cache if tool_cache is not None else UpstreamToolCache()
 
     async def handle_list_tools(
         ctx: ServerRequestContext[Client], params: types.PaginatedRequestParams | None
     ) -> types.ListToolsResult:
         upstream: Client = ctx.lifespan_context
         principal = current_principal()
-        result = await upstream.list_tools()
-        allowed = [tool for tool in result.tools if is_tool_allowed(policy, principal, tool.name)]
+        tools = await cache.get(upstream)
+        allowed = [tool for tool in tools if is_tool_allowed(policy, principal, tool.name)]
         return types.ListToolsResult(tools=allowed)
 
     return handle_list_tools
@@ -119,6 +185,7 @@ def make_call_tool_handler(
     audit_logger: AuditLogger,
     *,
     upstream_call_timeout_seconds: float | None = None,
+    tool_cache: UpstreamToolCache | None = None,
 ) -> CallToolHandler:
     """Build an on_call_tool handler that independently authorizes every call.
 
@@ -126,7 +193,9 @@ def make_call_tool_handler(
 
     1. rate limit - every authenticated, structurally valid attempt consumes
        a token, *including* one this pipeline goes on to deny below
-    2. tool authorization
+    2. tool authorization - including confirming the upstream still actually
+       has the tool, via the cached `tools/list` result (see `tool_cache`
+       and `UpstreamToolCache`)
     3. upstream inputSchema validation
     4. SentinelMCP argument-constraint evaluation
     5. concurrency ceiling - acquired only for a call that survived 1-4,
@@ -137,7 +206,13 @@ def make_call_tool_handler(
     stage's rejection is worded distinguishably from the others, and exactly
     one terminal `AuditRecord` is emitted no matter which stage the call
     exits at (including an unexpected exception at any stage).
+
+    `tool_cache` defaults to a private cache scoped to this one handler
+    closure if not given; pass the same instance used by
+    `make_list_tools_handler` (as `build_gateway_server` does) so both
+    handlers share one cached fetch.
     """
+    cache = tool_cache if tool_cache is not None else UpstreamToolCache()
 
     async def handle_call_tool(
         ctx: ServerRequestContext[Client], params: types.CallToolRequestParams
@@ -204,8 +279,8 @@ def make_call_tool_handler(
                 return finalize(_denied_result(tool_name))
 
             upstream: Client = ctx.lifespan_context
-            upstream_tools = await upstream.list_tools()
-            upstream_tool = next((t for t in upstream_tools.tools if t.name == tool_name), None)
+            upstream_tools = await cache.get(upstream)
+            upstream_tool = next((t for t in upstream_tools if t.name == tool_name), None)
             if upstream_tool is None:
                 # Allowed by policy, but the upstream doesn't actually have it -
                 # still "unknown", for the same reason a denied call is.
@@ -255,10 +330,10 @@ def make_call_tool_handler(
                     upstream_latency_ms = upstream_timer.elapsed_ms()
                     await emit(AuditOutcome.CANCELLED, upstream_attempted=True, upstream_result_category="cancelled")
                     raise
-                except Exception:
+                except Exception as exc:
                     upstream_latency_ms = upstream_timer.elapsed_ms()
                     await emit(AuditOutcome.UPSTREAM_ERROR, upstream_attempted=True, upstream_result_category="error")
-                    raise
+                    return finalize(_upstream_error_result(tool_name, str(exc)))
 
                 upstream_latency_ms = upstream_timer.elapsed_ms()
                 await emit(AuditOutcome.UPSTREAM_SUCCESS, upstream_attempted=True, upstream_result_category="success")

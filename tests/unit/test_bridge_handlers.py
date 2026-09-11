@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock
 import pytest
 from mcp import types
 
-from sentinelmcp.gateway.bridge import make_call_tool_handler, make_list_tools_handler
+from sentinelmcp.gateway.bridge import UpstreamToolCache, make_call_tool_handler, make_list_tools_handler
 from sentinelmcp.gateway.identity import authenticated_as
 from sentinelmcp.gateway.limits import ConcurrencyLimiter, RateLimiter
 from sentinelmcp.policy.models import PolicyConfig
@@ -217,6 +217,55 @@ async def test_call_tool_denies_for_unknown_principal_without_reaching_upstream(
     assert result.is_error
 
 
+# --- tools/list caching -------------------------------------------------------
+
+
+async def test_repeated_call_tool_invocations_share_one_cached_tools_list():
+    """Proves the wiring, not just the cache class: a handler built with a
+    shared UpstreamToolCache calls the mocked upstream's list_tools() once,
+    not once per tools/call - the actual overhead this cache exists to cut."""
+    upstream = _upstream_with_tool("allowed.tool")
+    upstream.call_tool.return_value = types.CallToolResult(content=[], is_error=False)
+    tool_cache = UpstreamToolCache()
+    rate_limiter = RateLimiter(capacity=1000.0, refill_rate=1000.0)
+    concurrency_limiter = ConcurrencyLimiter(max_concurrent=1000)
+    handler = make_call_tool_handler(
+        POLICY, rate_limiter, concurrency_limiter, _NULL_AUDIT_LOGGER, tool_cache=tool_cache
+    )
+    params = types.CallToolRequestParams(name="allowed.tool", arguments={"x": 1})
+
+    with authenticated_as("agent"):
+        for _ in range(5):
+            result = await handler(_fake_ctx(upstream), params)
+            assert not result.is_error
+
+    upstream.list_tools.assert_awaited_once()
+
+
+async def test_list_tools_and_call_tool_share_one_cache_instance():
+    """The same UpstreamToolCache passed to both handler factories (as
+    build_gateway_server does) means tools/list priming the cache means a
+    subsequent tools/call does not re-fetch, and vice versa."""
+    upstream = _upstream_with_tool("allowed.tool")
+    upstream.call_tool.return_value = types.CallToolResult(content=[], is_error=False)
+    tool_cache = UpstreamToolCache()
+    list_handler = make_list_tools_handler(POLICY, tool_cache)
+    call_handler = make_call_tool_handler(
+        POLICY,
+        RateLimiter(1000.0, 1000.0),
+        ConcurrencyLimiter(max_concurrent=1000),
+        _NULL_AUDIT_LOGGER,
+        tool_cache=tool_cache,
+    )
+    params = types.CallToolRequestParams(name="allowed.tool", arguments={"x": 1})
+
+    with authenticated_as("agent"):
+        await list_handler(_fake_ctx(upstream), None)
+        await call_handler(_fake_ctx(upstream), params)
+
+    upstream.list_tools.assert_awaited_once()
+
+
 # --- rate limiting -----------------------------------------------------------
 
 
@@ -278,15 +327,23 @@ async def test_concurrency_rejected_call_never_reaches_upstream():
 
 
 async def test_concurrency_capacity_is_released_after_upstream_exception():
+    """An upstream exception is caught and returned as a graceful, protocol-
+    correct CallToolResult (mirroring the timeout branch), not re-raised -
+    see _upstream_error_result's docstring for why a raised exception here
+    was a real, observed problem (it tore down the downstream caller's own
+    transport-level stream instead of producing a clean tool-level error)."""
     upstream = _upstream_with_tool("allowed.tool")
     upstream.call_tool.side_effect = RuntimeError("upstream blew up")
     concurrency_limiter = ConcurrencyLimiter(max_concurrent=1)
     handler = make_call_tool_handler(POLICY, RateLimiter(1000.0, 1000.0), concurrency_limiter, _NULL_AUDIT_LOGGER)
     params = types.CallToolRequestParams(name="allowed.tool", arguments={"x": 1})
 
-    with authenticated_as("agent"), pytest.raises(RuntimeError):
-        await handler(_fake_ctx(upstream), params)
+    with authenticated_as("agent"):
+        result = await handler(_fake_ctx(upstream), params)
 
+    assert result.is_error
+    assert "Upstream error" in result.content[0].text
+    assert "upstream blew up" in result.content[0].text
     assert await concurrency_limiter.active_count("agent") == 0
 
 

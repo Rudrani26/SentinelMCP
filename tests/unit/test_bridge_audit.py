@@ -141,15 +141,18 @@ async def test_concurrency_rejected_call_emits_one_concurrency_rejected_record(t
     assert records[0]["upstream_attempted"] is False
 
 
-async def test_upstream_exception_emits_one_upstream_error_record_then_propagates(tmp_path: Path):
+async def test_upstream_exception_emits_one_upstream_error_record_and_returns_gracefully(tmp_path: Path):
     audit_logger = AuditLogger(tmp_path / "audit.jsonl")
     upstream = _upstream_with_tool("allowed.tool")
     upstream.call_tool.side_effect = RuntimeError("boom")
     handler = make_call_tool_handler(POLICY, RateLimiter(1000.0, 1000.0), ConcurrencyLimiter(1000), audit_logger)
     params = types.CallToolRequestParams(name="allowed.tool", arguments={})
 
-    with authenticated_as("agent"), pytest.raises(RuntimeError):
-        await handler(_fake_ctx(upstream), params)
+    with authenticated_as("agent"):
+        result = await handler(_fake_ctx(upstream), params)
+
+    assert result.is_error
+    assert "Upstream error" in result.content[0].text
 
     records = _read_records(tmp_path / "audit.jsonl")
     assert len(records) == 1
@@ -269,7 +272,7 @@ async def test_every_failure_category_produces_a_pairwise_distinct_audit_outcome
     # upstream_error
     error_upstream = _upstream_with_tool("allowed.tool")
     error_upstream.call_tool.side_effect = RuntimeError("boom")
-    with authenticated_as("agent"), pytest.raises(RuntimeError):
+    with authenticated_as("agent"):
         await generous_handler(_fake_ctx(error_upstream), params)
 
     # upstream_timeout

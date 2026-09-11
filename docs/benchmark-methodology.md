@@ -145,12 +145,13 @@ console output is a human-readable summary of the same numbers.
 - This is a single-machine, loopback benchmark. It says nothing about
   network-attached deployment, TLS termination overhead, or multi-process/
   multi-replica behavior (out of scope for v1 - see the threat model).
-- The gateway currently re-fetches the upstream's tool list on every
-  `tools/call` (no caching - see Phase 3's known limitations) specifically
-  to validate the argument schema; this is a real, measured contributor to
-  gateway overhead in these results, not a benchmark artifact, and is a
-  legitimate first target if overhead is ever optimized (not done in v1 -
-  no optimization is proposed here, only a baseline).
+- The gateway's per-call upstream `tools/list` round trip - previously
+  re-fetched on every single `tools/call` - was identified as a leading
+  overhead suspect from the original baseline below, then measured,
+  cached (`UpstreamToolCache`, see `docs/architecture.md`), and
+  re-measured. See the before/after note at the end of this document for
+  the actual result; do not assume caching improved anything without
+  reading that measured comparison.
 - Results depend on the host machine and will vary run to run and machine to
   machine; only the JSON output from an actual run on a specific machine
   should be cited as a number, never a number from this document.
@@ -158,3 +159,22 @@ console output is a human-readable summary of the same numbers.
   benchmarking hardware; absolute numbers should be read as illustrative of
   relative (direct vs. gateway) behavior, not as production capacity
   planning figures.
+
+## Tool-list caching: measured before/after
+
+Two real runs on the same machine, same methodology, same code except for
+the presence of `UpstreamToolCache` (see `docs/architecture.md`'s
+"Tool-list caching" section for the change itself):
+
+- Before: `benchmarks/results/2026-09-08T17-45-38.212871+00-00.json`
+- After: `benchmarks/results/2026-09-10T19-40-16.462078+00-00.json`
+
+Gateway p50 dropped by roughly 25-35% at every concurrency level tested,
+for both `benchmark.noop` and `benchmark.fixed_latency` - see the README's
+"Measured effect of caching the upstream's `tools/list` result" section for
+the full table. Policy-evaluation latency (from the audit log,
+independent of this change) stayed within measurement noise of its
+pre-change value (~0.9ms p50 both runs) - consistent with the improvement
+coming specifically from removing a redundant network round trip, not from
+an unrelated change to policy evaluation itself. This does not eliminate
+gateway overhead; it removed one identified, measured contributor to it.

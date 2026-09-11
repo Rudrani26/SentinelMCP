@@ -127,13 +127,57 @@ below) before the response returns.
 
 ## Tool discovery (`tools/list`)
 
-`sentinelmcp/gateway/bridge.py::make_list_tools_handler` fetches the
-upstream's real tool list on every request (no caching), preserving each
-tool's real name/description/`inputSchema` unchanged, and filters to only
-the tools the authenticated principal is allowed to call. Hiding a tool from
-this list is explicitly **not** a security boundary - `tools/call`
-independently re-checks authorization for every call, including one for a
-tool never shown in discovery.
+`sentinelmcp/gateway/bridge.py::make_list_tools_handler` gets the upstream's
+tool list - preserving each tool's real name/description/`inputSchema`
+unchanged - and filters to only the tools the authenticated principal is
+allowed to call. Hiding a tool from this list is explicitly **not** a
+security boundary - `tools/call` independently re-checks authorization for
+every call, including one for a tool never shown in discovery.
+
+### Tool-list caching (`UpstreamToolCache`)
+
+The upstream's `tools/list` result is fetched once and cached, rather than
+re-fetched on every `tools/list` and `tools/call` (the original v1
+behavior). `build_gateway_server` constructs one `UpstreamToolCache` and
+passes it to both `make_list_tools_handler` and `make_call_tool_handler`,
+so a `tools/list` call and a subsequent `tools/call` share the same fetch.
+
+**Cache scope.** This gateway holds exactly one upstream `Client` connection
+for its entire process lifetime (see `lifespan`, above), shared across every
+downstream session - so "cached for this one connection" and "cached
+gateway-wide" describe the exact same scope here, not two designs to choose
+between. There is no per-downstream-session or per-principal cache.
+
+**Concurrency safety.** `UpstreamToolCache.get()` holds its lock across the
+fetch itself (not just around reading/writing the cached value), so a cold
+cache never issues more than one real `tools/list` round trip even under
+concurrent first callers - later callers simply wait for the lock and then
+see the now-populated cache.
+
+**Invalidation.** There is currently no code path in this gateway that
+reconnects a dropped upstream connection - `lifespan` opens the `Client`
+once, and if the underlying transport dies, the gateway does not attempt to
+re-establish it (see `tests/integration/test_upstream_disconnect.py` for
+what actually happens instead: the failing call resolves gracefully, but
+the gateway's session-serving capability for *all* subsequent traffic
+degrades and does not recover - a disclosed limitation, not a hidden one).
+So there is no "stale after reconnect" scenario to handle automatically
+today. `UpstreamToolCache.invalidate()` exists as an explicit, tested seam
+for an operator or a future reconnect implementation to force a re-fetch;
+nothing in the current runtime path calls it on its own.
+
+**Deliberately not built:** a TTL, and a subscriber to the SDK's
+`tools/list_changed` notification mechanism (`mcp.client.caching` /
+`Client.listen(tools_list_changed=True)`, both present in the installed
+SDK). The upstream fixture this project ships (`examples/upstream_server.py`)
+never changes its tool set at runtime, so there is currently no real
+scenario in this repository that would exercise either - adding either
+would be speculative complexity ahead of an actual need, which CLAUDE.md's
+engineering rules explicitly discourage ("no premature optimization",
+"prefer simplicity"). If a future upstream's tool set could legitimately
+change at runtime, subscribing to `tools/list_changed` and calling
+`invalidate()` from that handler would be the natural extension - the cache
+was designed with that seam (`invalidate()`) already in place.
 
 ## Authentication
 

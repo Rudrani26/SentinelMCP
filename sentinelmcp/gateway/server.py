@@ -24,7 +24,7 @@ from mcp import Client
 from mcp.server.lowlevel.server import Server
 from starlette.types import ASGIApp
 
-from sentinelmcp.gateway.bridge import make_call_tool_handler, make_list_tools_handler
+from sentinelmcp.gateway.bridge import UpstreamToolCache, make_call_tool_handler, make_list_tools_handler
 from sentinelmcp.gateway.identity import BearerAuthMiddleware, IdentityResolver
 from sentinelmcp.gateway.limits import ConcurrencyLimiter, RateLimiter
 from sentinelmcp.policy.models import PolicyConfig, load_policy
@@ -62,17 +62,23 @@ def build_gateway_server(
         async with Client(upstream_url, mode="legacy") as upstream_client:
             yield upstream_client
 
+    # One cache, shared by both handlers, for this process's whole lifetime -
+    # the same lifetime as the single upstream Client `lifespan` holds above.
+    # See UpstreamToolCache's docstring for why that scope is correct here.
+    tool_cache = UpstreamToolCache()
+
     return Server(
         "sentinelmcp-gateway",
         version="0.0.1",
         lifespan=lifespan,
-        on_list_tools=make_list_tools_handler(policy),
+        on_list_tools=make_list_tools_handler(policy, tool_cache),
         on_call_tool=make_call_tool_handler(
             policy,
             rate_limiter,
             concurrency_limiter,
             audit_logger,
             upstream_call_timeout_seconds=upstream_call_timeout_seconds,
+            tool_cache=tool_cache,
         ),
     )
 

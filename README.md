@@ -54,7 +54,7 @@ python -m venv .venv
 .venv/Scripts/activate   # or: source .venv/bin/activate  (macOS/Linux)
 pip install -e ".[dev]"
 
-pytest                        # 178 tests
+pytest                        # the full suite (run it to see the current count)
 python -m benchmarks.run      # direct-vs-gateway benchmark, ~a few minutes
 ```
 
@@ -162,40 +162,77 @@ pytest tests/unit    # fast, no real network
 pytest tests/integration   # real loopback Streamable HTTP servers
 ```
 
-178 tests (unit + integration), including two Hypothesis property tests
+188 tests as of this writing (unit + integration + a real-subprocess
+upstream-disconnect chaos test), including two Hypothesis property tests
 (no argument-policy mutation across arbitrary type-confused inputs; no
 sensitive-value leak through redaction at any nesting depth or key-casing
-variant). Every one of the 18 numbered security invariants in this
-project's build instructions maps to at least one automated test - see
+variant). Run `pytest` for the current, authoritative count - this number
+is not re-verified automatically and can drift as the suite grows. Every
+one of the 18 numbered security invariants in this project's build
+instructions maps to at least one automated test - see
 [`docs/adversarial-tests.md`](docs/adversarial-tests.md) for the full
 mapping.
 
 ## Benchmark results
 
-One real, committed baseline run (loopback Streamable HTTP, direct
+One real, committed run (loopback Streamable HTTP, direct
 client->upstream vs. client->SentinelMCP->upstream), 5 trials per
 configuration with a discarded warm-up each, 0% errors and 0% timeouts
-across all 27,900 requests in the run:
+across all 27,902 requests in the run:
 
 **Environment**: Windows-11-10.0.26200-SP0, Intel64 8 cores, CPython 3.14.2,
 mcp 2.2.0, uvicorn 0.52.4, httpx2 2.12.0, jsonschema 4.26.0.
 
 | Tool | Concurrency | Direct p50 | Gateway p50 | Overhead |
 |---|---|---|---|---|
-| noop | 1 | 6.3ms | 30.9ms | +24.6ms (+389%) |
-| noop | 10 | 79.6ms | 329.9ms | +250.2ms (+314%) |
-| noop | 25 | 217.9ms | 838.9ms | +621.0ms (+285%) |
-| noop | 50 | 476.4ms | 1730.0ms | +1253.6ms (+263%) |
-| noop | 100 | 998.9ms | 3513.2ms | +2514.3ms (+252%) |
-| fixed_latency (10ms) | 1 | 32.3ms | 60.9ms | +28.6ms (+89%) |
-| fixed_latency (10ms) | 100 | 927.9ms | 3572.8ms | +2644.9ms (+285%) |
+| noop | 1 | 4.3ms | 20.3ms | +16.0ms (+373%) |
+| noop | 10 | 75.6ms | 218.3ms | +142.8ms (+189%) |
+| noop | 25 | 244.5ms | 592.7ms | +348.2ms (+142%) |
+| noop | 50 | 506.4ms | 1140.9ms | +634.6ms (+125%) |
+| noop | 100 | 1077.3ms | 2406.3ms | +1328.9ms (+123%) |
+| fixed_latency (10ms) | 1 | 32.7ms | 47.9ms | +15.2ms (+47%) |
+| fixed_latency (10ms) | 100 | 987.1ms | 2561.4ms | +1574.3ms (+160%) |
 
-Policy-evaluation latency alone (from the same run's audit log, 27,900
-records): **p50=0.98ms, p95=2.23ms, p99=2.77ms** - a small, stable fraction
-of total gateway latency; the bulk of the overhead is elsewhere (a leading
-suspect, not yet investigated further: the gateway's per-call upstream
-`tools/list` round trip for schema lookup - see
-[Limitations](#limitations)).
+Policy-evaluation latency alone (from the same run's audit log, 27,902
+records): **p50=0.87ms, p95=2.27ms, p99=3.59ms** - a small, stable fraction
+of total gateway latency, essentially unchanged from before the change
+below (confirming the improvement below came from removing a network round
+trip, not from policy evaluation itself).
+
+### Measured effect of caching the upstream's `tools/list` result
+
+The previous baseline flagged the gateway's per-call, uncached
+`upstream.list_tools()` round trip (needed to confirm a tool still exists
+and to fetch its schema - see [Limitations](#limitations)) as the leading
+overhead suspect. It's since been cached (`UpstreamToolCache`, shared
+across `tools/list` and `tools/call` for the gateway's whole process
+lifetime - see [`docs/architecture.md`](docs/architecture.md#tool-list-caching-upstreamtoolcache)),
+and the effect was measured, not assumed - same machine, same
+methodology, before and after:
+
+| Tool | Concurrency | Gateway p50 before | Gateway p50 after | Change |
+|---|---|---|---|---|
+| noop | 1 | 27.2ms | 20.3ms | -25% |
+| noop | 10 | 322.5ms | 218.3ms | -32% |
+| noop | 25 | 857.8ms | 592.7ms | -31% |
+| noop | 50 | 1749.9ms | 1140.9ms | -35% |
+| noop | 100 | 3485.0ms | 2406.3ms | -31% |
+| fixed_latency (10ms) | 1 | 57.7ms | 47.9ms | -17% |
+| fixed_latency (10ms) | 100 | 3843.8ms | 2561.4ms | -33% |
+
+A consistent ~25-35% reduction in gateway p50 latency across every
+configuration tested, both benchmark tools, both low and high concurrency.
+Policy-evaluation latency itself stayed flat (~0.9ms p50 both before and
+after), which is expected and reassuring: it's independent evidence the
+improvement really did come from removing a redundant network round trip,
+not from some unrelated change. This does not eliminate gateway overhead -
+transport, session, and scheduling costs remain the largest contributors,
+especially at high concurrency - it removed one identified, measured
+contributor. Raw before/after JSON:
+[`benchmarks/results/2026-09-08T17-45-38.212871+00-00.json`](benchmarks/results/2026-09-08T17-45-38.212871+00-00.json)
+(before) and
+[`benchmarks/results/2026-09-10T19-40-16.462078+00-00.json`](benchmarks/results/2026-09-10T19-40-16.462078+00-00.json)
+(after).
 
 Both paths' throughput plateaus by concurrency=10 in this environment (a
 single-machine, sandboxed-VM benchmark - not a production capacity claim);
@@ -230,11 +267,17 @@ and assumptions: [`docs/threat-model.md`](docs/threat-model.md).
 - `deny_unknown_arguments` inspects only top-level argument names; the
   upstream's own `inputSchema` (checked first) is what's expected to catch
   a nested unknown field when the schema restricts it.
-- The gateway re-fetches the upstream's tool list on every `tools/call`
-  (no caching) specifically to validate arguments against its schema - a
-  real, measured contributor to gateway latency, not addressed in v1
-  (no optimization was attempted without first measuring - see the
-  benchmark methodology).
+- The upstream's `tools/list` result is cached for the gateway process's
+  whole lifetime (see [`docs/architecture.md`](docs/architecture.md#tool-list-caching-upstreamtoolcache));
+  there is no TTL and no subscription to upstream tool-change notifications,
+  since the bundled upstream fixture's tool set never changes at runtime -
+  see the linked section for the invalidation seam that exists for a future
+  upstream that does.
+- No automatic reconnect if the upstream connection is fully severed (as
+  opposed to one call failing): the in-flight call resolves gracefully, but
+  the gateway's session-serving capability for *all* subsequent traffic
+  degrades afterward and does not recover without a restart - proven, not
+  assumed, by `tests/integration/test_upstream_disconnect.py`.
 - Application-layer only: TLS/transport security is the deployment
   environment's responsibility, not implemented here.
 - Benchmark numbers are from one sandboxed development VM, not dedicated
